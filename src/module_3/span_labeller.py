@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 import os
+import math
 
 load_dotenv()
 k = 2
@@ -48,7 +49,8 @@ def get_top_k(vec, ref_list, turns):
                    ref_list[i] in t.get('turn_conv_marker', []):
                     result.append(ref_list[i])
                     break
-    return list(dict.fromkeys(result))
+    result = list(dict.fromkeys(result))
+    return result
 
 def filter_entities(global_entities, active_indices):
     output = {}
@@ -70,16 +72,20 @@ def process_span(turns, meta):
 
     b_vecs, c_vecs = [], []
 
-    for t in turns: # for every turn
+    for t in turns:
         causal = t.get("causal_score", 0)
-        b_vecs.append(one_hot(t.get("turn_business_label", []), ALL_BUSINESS_LABELS) * causal) #final_business_vector
-        c_vecs.append(one_hot(t.get("turn_conv_marker", []), ALL_CONV_MARKERS) * causal) #final_conv_vector
+
+        b = one_hot(t.get("turn_business_label", []), ALL_BUSINESS_LABELS) * causal
+        c = one_hot(t.get("turn_conv_marker", []), ALL_CONV_MARKERS) * causal
+
+        b_vecs.append(b)
+        c_vecs.append(c)
 
     final_b = np.max(b_vecs, axis=0)
     final_c = np.max(c_vecs, axis=0)
 
     span_meta = {
-        "category_vector": final_b.tolist() + final_c.tolist(), #category_vector
+        "category_vector": final_b.tolist() + final_c.tolist(),
         "span_id": str(uuid.uuid4()),
         "span_label": {
             "business_label": get_top_k(final_b, ALL_BUSINESS_LABELS, turns),
@@ -89,26 +95,47 @@ def process_span(turns, meta):
     }
     return span_meta
 
-
 csv_path = os.getenv("DATASET_PATH")
 df = pd.read_csv(csv_path)
+df.columns = df.columns.str.strip()
 
-target_index = df.index[-1]
+if "span_metadata" not in df.columns:
+    df["span_metadata"] = None
 
-analysis_list = json.loads(df.at[target_index, "Analysis"])
+for idx, row in df.iterrows():
+    raw_analysis = row.get("analysis")
+    raw_meta = row.get("inferenced_metadata")
 
-meta_raw = clean_metadata_json(df.at[target_index, "Inferred_Metadata"])
-meta_list = json.loads(meta_raw)
+    if raw_analysis is None or (isinstance(raw_analysis, float) and math.isnan(raw_analysis)):
+        continue
+    if raw_meta is None or (isinstance(raw_meta, float) and math.isnan(raw_meta)):
+        continue
 
-all_span_metadata = []
-for span_block in analysis_list:
-    if isinstance(span_block, dict):
-        span_block = [span_block]
-    span_meta = process_span(span_block, meta_list)
-    all_span_metadata.append(span_meta)
+    if isinstance(raw_analysis, str):
+        analysis_list = json.loads(raw_analysis)
+    elif isinstance(raw_analysis, list):
+        analysis_list = raw_analysis
+    else:
+        continue
 
-df.at[target_index, "span_metadata"] = json.dumps(all_span_metadata)
+    if isinstance(raw_meta, str):
+        meta_clean = clean_metadata_json(raw_meta)
+        meta_dict = json.loads(meta_clean)
+    elif isinstance(raw_meta, dict):
+        meta_dict = raw_meta
+    else:
+        continue
+
+    all_span_metadata = []
+    count = 0
+    for span_block in analysis_list:
+        span_meta = process_span(span_block if isinstance(span_block, list) else [span_block], meta_dict)
+        all_span_metadata.append(span_meta)
+        count = count + 1
+
+    df.at[idx, "span_metadata"] = json.dumps(all_span_metadata)
+    print(f"Row {idx}, with total spans = {count} done!")
+
 df.to_csv(csv_path, index=False)
 
-print("\n Generated span metadata for ALL spans in analysis_list for row:", target_index)
-print(json.dumps(all_span_metadata, indent=4))
+print("\n ALL ROWS & ALL SPANS PROCESSED SUCCESSFULLY")
