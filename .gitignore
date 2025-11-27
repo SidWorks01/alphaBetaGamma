@@ -1,0 +1,7 @@
+*.csv
+*.json
+.env
+*.venv
+uv.lock
+src/baseline_rag
+.~lock.output.csv#
