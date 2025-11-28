@@ -3,5 +3,7 @@
 .env
 *.venv
 uv.lock
-src/baseline_rag
+src/baseline_rag/dataset.json
+src/baseline_rag/chroma_db
 .~lock.output.csv#
+chroma_db
