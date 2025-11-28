@@ -24,16 +24,11 @@ import chromadb
 from chromadb.config import Settings, DEFAULT_TENANT, DEFAULT_DATABASE
 
 # -------------------- Config --------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Set OPENAI_API_KEY in your .env file or environment")
-
 # Default locations (adjust if needed)
 PROJECT_ROOT = os.getcwd()                         # typically project root when using uv
-DATASET_PATH = os.getenv("DATASET_PATH", "dataset.json")
+DATASET_PATH = os.getenv("DATASET_PATH", "data/dataset.json")
 CHROMA_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-
-EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "100"))
 PERSIST_EVERY_N_BATCHES = int(os.getenv("PERSIST_EVERY_N_BATCHES", "1"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
@@ -44,9 +39,7 @@ CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 
 COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "transcripts")
 
-# -------------------- Clients --------------------
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
-
+# -------------------- Clients -------------------
 # Use PersistentClient for on-disk storage (new Chroma API)
 client = chromadb.PersistentClient(
     path=CHROMA_DIR,
@@ -81,21 +74,84 @@ def chunk_text(text: str, max_chars: int = CHUNK_MAX_CHARS, overlap: int = CHUNK
     return chunks
 
 def safe_embed_texts(texts: List[str], model: str = EMBED_MODEL, max_retries: int = MAX_RETRIES) -> List[List[float]]:
-    """Call OpenAI embeddings with retries and exponential backoff. Returns list of embeddings in same order."""
+    """
+    Local embedding using Hugging Face BGE (BAAI) models.
+    - Caches tokenizer & model on first call to avoid reloading.
+    - Performs tokenization (truncation to 512 tokens), mean-pooling with attention mask,
+      and L2-normalization to produce unit vectors (useful for cosine search with inner-product).
+    - Keeps the same retry/backoff behavior as the original function (for transient local errors).
+    Returns: List of float lists (embeddings) in the same order as `texts`.
+    """
+    import time
+    import random
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+
+    # Static cache on the function object so we don't re-load every call
+    if not hasattr(safe_embed_texts, "_hf_cached"):
+        safe_embed_texts._hf_cached = {}
+
+    cache = safe_embed_texts._hf_cached
+
+    # Load model & tokenizer if needed (cache by model name)
+    if model not in cache:
+        print(f"[embed-local] Loading HF model/tokenizer for '{model}' (this may take a while)...")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+            hf_model = AutoModel.from_pretrained(model)
+            # move model to GPU if available
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            hf_model.to(device)
+            hf_model.eval()
+            cache[model] = {"tokenizer": tokenizer, "model": hf_model, "device": device}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load model '{model}': {exc}") from exc
+
+    tokenizer = cache[model]["tokenizer"]
+    hf_model = cache[model]["model"]
+    device = cache[model]["device"]
+
     attempt = 0
     backoff = INITIAL_BACKOFF
+
+    # internal helper: mean pooling + normalization
+    def mean_pooling(token_embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        # token_embeddings: (B, T, D), attention_mask: (B, T)
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand_as(token_embeddings).float()
+        summed = torch.sum(token_embeddings * input_mask_expanded, dim=1)
+        counts = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
+        pooled = summed / counts
+        return torch.nn.functional.normalize(pooled, p=2, dim=1)
+
     while True:
         try:
-            resp = openai_client.embeddings.create(model=model, input=texts)
-            embeddings = [item.embedding for item in resp.data]
-            return embeddings
+            all_embs = []
+            # We'll process in micro-batches to avoid OOM if the incoming `texts` list is large.
+            # The ingest loop already batches by BATCH_SIZE, but be defensive here.
+            micro_batch = 32
+            for i in range(0, len(texts), micro_batch):
+                batch = texts[i : i + micro_batch]
+                toks = tokenizer(batch, padding=True, truncation=True, max_length=512, return_tensors="pt")
+                input_ids = toks["input_ids"].to(device)
+                attention_mask = toks["attention_mask"].to(device)
+                with torch.no_grad():
+                    out = hf_model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+                    # out.last_hidden_state: (B, T, D)
+                    pooled = mean_pooling(out.last_hidden_state, attention_mask)  # (B, D)
+                    emb_cpu = pooled.cpu().numpy()
+                for row in emb_cpu:
+                    all_embs.append(row.tolist())
+            if len(all_embs) != len(texts):
+                raise RuntimeError(f"Embedding length mismatch: got {len(all_embs)} embeddings for {len(texts)} texts")
+            return all_embs
+
         except Exception as exc:
             attempt += 1
             if attempt > max_retries:
-                raise RuntimeError(f"Embeddings failed after {max_retries} retries: {exc}") from exc
+                raise RuntimeError(f"Local embeddings failed after {max_retries} retries: {exc}") from exc
             jitter = random.random() * 0.5
             wait = backoff + jitter
-            print(f"[embed] attempt {attempt} failed: {exc}. Retrying in {wait:.1f}s ...")
+            print(f"[embed-local] attempt {attempt} failed: {exc}. Retrying in {wait:.1f}s ...")
             time.sleep(wait)
             backoff *= 2
 

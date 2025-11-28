@@ -4,6 +4,7 @@ from typing import List, Dict
 
 from dotenv import load_dotenv
 load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # OpenAI new client
 from openai import OpenAI
@@ -12,15 +13,11 @@ from openai import OpenAI
 import chromadb
 from chromadb.config import Settings, DEFAULT_TENANT, DEFAULT_DATABASE
 
-# --------- Config (adjust if needed) ----------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Set OPENAI_API_KEY in .env")
 
 CHROMA_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 COLLECTION_NAME = os.getenv("CHROMA_COLLECTION", "transcripts")
 
-EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")   # choose your chat model
 TOP_K = int(os.getenv("TOP_K", "5"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))  # approximate truncation
@@ -33,11 +30,60 @@ try:
     collection = client.get_collection(COLLECTION_NAME)
 except Exception:
     collection = client.get_or_create_collection(COLLECTION_NAME)
-
-# --------- Helpers ----------
+    
 def embed_query(query: str) -> List[float]:
-    resp = openai_client.embeddings.create(model=EMBED_MODEL, input=[query])
-    return resp.data[0].embedding
+    """
+    Local HF embedding for a single query string. Caches tokenizer+model per model name.
+    Returns: list[float] (L2-normalized embedding)
+    """
+    # lazy imports to avoid top-level cost if not used
+    from transformers import AutoTokenizer, AutoModel
+    import torch
+    import numpy as np
+    import time
+    import random
+
+    # Use the global EMBED_MODEL (unchanged)
+    model_name = EMBED_MODEL
+
+    # Cache on the function object so we don't reload repeatedly
+    if not hasattr(embed_query, "_hf_cache"):
+        embed_query._hf_cache = {}
+
+    cache = embed_query._hf_cache
+
+    if model_name not in cache:
+        try:
+            print(f"[embed-query] Loading HF model/tokenizer for '{model_name}' (this may take a while)...")
+            tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+            hf_model = AutoModel.from_pretrained(model_name)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            hf_model.to(device)
+            hf_model.eval()
+            cache[model_name] = {"tokenizer": tokenizer, "model": hf_model, "device": device}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load HF model '{model_name}': {exc}") from exc
+
+    tokenizer = cache[model_name]["tokenizer"]
+    hf_model = cache[model_name]["model"]
+    device = cache[model_name]["device"]
+
+    # tokenization, forward, mean-pooling, normalize
+    toks = tokenizer([query], padding=True, truncation=True, max_length=512, return_tensors="pt")
+    input_ids = toks["input_ids"].to(device)
+    attention_mask = toks["attention_mask"].to(device)
+    with torch.no_grad():
+        out = hf_model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+        token_embeddings = out.last_hidden_state  # (1, T, D)
+        input_mask_expanded = attention_mask.unsqueeze(-1).expand_as(token_embeddings).float()
+        summed = torch.sum(token_embeddings * input_mask_expanded, dim=1)
+        counts = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
+        pooled = summed / counts  # (1, D)
+        normalized = torch.nn.functional.normalize(pooled, p=2, dim=1)  # unit vector
+
+    emb = normalized.cpu().numpy()[0].astype(float)  # numpy 1D array
+    return emb.tolist()
+
 def retrieve_chunks(query_emb: List[float], top_k: int = TOP_K, where: dict = None) -> List[Dict]:  
     if where and len(where) > 0:
         # valid filter

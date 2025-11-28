@@ -25,7 +25,7 @@ INPUT_COL = "transcript"          # column with {"0": "Agent: ...", ...}
 OUTPUT_COL = "annotated"          # column to store the new structured json
 SAVE_EVERY = 200                  # checkpoint frequency (not used in this small example)
 OUTPUT_PATH = "df_turned_annotated.parquet"  # kept for compatibility if you want to switch
-NUM_WORKERS = 5                  # number of threads
+NUM_WORKERS = 8                  # number of threads
 
 input_file = 'data/input.csv'
 output_file = 'data/output.csv'
