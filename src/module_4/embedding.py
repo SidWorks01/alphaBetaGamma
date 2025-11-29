@@ -178,8 +178,3 @@ def add_batches_to_chroma(texts: List[str], metadatas: List[Dict], batch_size: i
 
 # run the batch upload
 add_batches_to_chroma(chunks_texts, chunks_meta, batch_size=BATCH_SIZE)
-
-# final: print total count of vectors (approx)
-all_ids = collection.get(include=["ids"])["ids"]
-print("All done. Total vectors in collection (approx):", len(all_ids))
-

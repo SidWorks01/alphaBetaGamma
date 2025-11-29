@@ -13,6 +13,7 @@ dependencies = [
     "langgraph>=1.0.4",
     "openai>=2.8.1",
     "python-dotenv>=1.2.1",
+    "sentence-transformers>=5.1.2",
     "sentencepiece>=0.2.1",
     "torch>=2.9.1",
     "tqdm>=4.67.1",
