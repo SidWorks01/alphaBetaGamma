@@ -1,10 +1,5 @@
 import json
 import csv
-import os
-from dotenv import load_dotenv
-
-
-load_dotenv()
 
 # parameters
 threshold = 70
@@ -205,8 +200,8 @@ def map_classes_to_turns(turns_json, classes):
     return class_to_turns
 
 
-input_csv =  os.getenv("DATASET_PATH")       # <-- dataset CSV
-output_csv = os.getenv("DATASET_PATH")
+input_csv = "output (3).csv"               # <-- your existing CSV
+output_csv = "output (3).csv"              # <-- overwrite same CSV
 
 rows = []
 
@@ -245,7 +240,7 @@ for row in transcripts_list:
 
 
 # Write CSV
-with open( input_csv
+with open(output_csv # put transcript path here
           , "w", newline="", encoding="utf-8") as f:
     writer = csv.DictWriter(f, fieldnames=['transcript', 'metadata', 'inferenced_metadata','labels', 'analysis'])  # change column names
     writer.writeheader()
