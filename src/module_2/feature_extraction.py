@@ -130,7 +130,7 @@ def get_span_indices(turn_list, threshold, top_k):
 def get_span_turns(span_index, preprocessed):
     span = []
     for group in span_index:           # group is a list of indices
-        turns = [{"turn_idx":i, "turn":preprocessed[i]["turn"],"causal_score": preprocessed[i]["causal_score"],"business_label": preprocessed[i]["business_label"], "conversational_marker":preprocessed[i]["conversational_marker"]} for i in group]
+        turns = [{"turn_idx":i, "turn":preprocessed[i]["turn"],"causal_score": preprocessed[i]["causal_score"],"turn_business_label": preprocessed[i]["business_label"], "turn_conv_marker":preprocessed[i]["conversational_marker"]} for i in group]
         span.append(turns)
     return span
 
@@ -229,7 +229,7 @@ for row in transcripts_list:
 
     # Structure to store
     info = {
-        "span": span,
+        "spans": span,
         "flows": mapped,
         "temporal_vector": sent_vec
     }

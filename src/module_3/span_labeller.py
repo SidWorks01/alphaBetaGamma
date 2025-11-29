@@ -11,7 +11,8 @@ k = 2
 
 ALL_BUSINESS_LABELS = [
     "BRQ", "BRE", "BRS", "BIS", "BIR", "BRV", "BPU", "BTR", "BFR", "BNW",
-    "GENQ", "GRES", "POLI", "HOLD", "META", "NOISE", "OFFT", "REP", "ERR"
+    "GENQ", "GRES", "POLI", "HOLD", "META", "NOISE", "OFFT", "ERR",
+    "CRIT", "NCRT"
 ]
 
 ALL_CONV_MARKERS = [
@@ -21,7 +22,7 @@ ALL_CONV_MARKERS = [
 ]
 
 
-def clean_metadata_json(s: str):
+def clean_json(s: str):
     s = s.strip()
     if s.startswith('"') and s.endswith('"'):
         s = s[1:-1]
@@ -66,9 +67,10 @@ def filter_entities(global_entities, active_indices):
             output[category] = cat
     return output
 
-def process_span(turns, meta):
+def process_span_flow(turns, meta):
     global_entities = meta.get("entity", {})
     active_indices = [str(t.get("turn_idx")) for t in turns]
+    print(active_indices)
 
     b_vecs, c_vecs = [], []
 
@@ -84,25 +86,26 @@ def process_span(turns, meta):
     final_b = np.max(b_vecs, axis=0)
     final_c = np.max(c_vecs, axis=0)
 
-    span_meta = {
+    span_flow_meta = {
         "category_vector": final_b.tolist() + final_c.tolist(),
-        "span_id": str(uuid.uuid4()),
-        "span_label": {
+        "id": str(uuid.uuid4()),
+        "turn_idx": active_indices,
+        "label": {
             "business_label": get_top_k(final_b, ALL_BUSINESS_LABELS, turns),
             "conversational_markers": get_top_k(final_c, ALL_CONV_MARKERS, turns),
             "entity": filter_entities(global_entities, active_indices)
         }
     }
-    return span_meta
+    return span_flow_meta
 
 csv_path = os.getenv("DATASET_PATH")
 df = pd.read_csv(csv_path)
 df.columns = df.columns.str.strip()
 
-if "span_metadata" not in df.columns:
-    df["span_metadata"] = None
-
+if "span_flow_metadata" not in df.columns:
+    df["span_flow_metadata"] = None
 for idx, row in df.iterrows():
+
     raw_analysis = row.get("analysis")
     raw_meta = row.get("inferenced_metadata")
 
@@ -119,23 +122,43 @@ for idx, row in df.iterrows():
         continue
 
     if isinstance(raw_meta, str):
-        meta_clean = clean_metadata_json(raw_meta)
+        meta_clean = clean_json(raw_meta)
         meta_dict = json.loads(meta_clean)
     elif isinstance(raw_meta, dict):
         meta_dict = raw_meta
     else:
         continue
 
-    all_span_metadata = []
-    count = 0
-    for span_block in analysis_list:
-        span_meta = process_span(span_block if isinstance(span_block, list) else [span_block], meta_dict)
-        all_span_metadata.append(span_meta)
-        count = count + 1
+    if raw_analysis is None or meta_dict is None:
+        print(f"Skipping row {idx}: Could not load analysis or metadata")
+        continue
 
-    df.at[idx, "span_metadata"] = json.dumps(all_span_metadata)
-    print(f"Row {idx}, with total spans = {count} done!")
+    span_analysis_list = analysis_list["spans"]
+    flow_analysis_dict = analysis_list["flows"]
+
+    all_span_metadata = []
+    count_span = 0
+
+    for span_block in span_analysis_list:
+        span_meta = process_span_flow(span_block, meta_dict)
+        all_span_metadata.append(span_meta)
+        count_span += 1
+
+    all_flow_metadata = []
+    count_flow = 0
+
+    for flow_key, flow_turns in flow_analysis_dict.items():
+        flow_meta = process_span_flow(flow_turns, meta_dict)
+        all_flow_metadata.append({flow_key: flow_meta})
+        count_flow += 1
+
+    df.at[idx, "span_flow_metadata"] = json.dumps({
+        "spans": all_span_metadata,
+        "flows": all_flow_metadata
+    })
+
+    print(f"Row {idx}: spans={count_span}, flows={count_flow} processed")
+
 
 df.to_csv(csv_path, index=False)
-
-print("\n ALL ROWS & ALL SPANS PROCESSED SUCCESSFULLY")
+print("\n✔ ALL ROWS & ALL SPANS/FLOWS PROCESSED SUCCESSFULLY")
